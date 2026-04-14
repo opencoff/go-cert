@@ -22,31 +22,48 @@ import (
 	"time"
 )
 
-// CertExpiry returns the NotAfter timestamp and remaining days until
-// expiry of the leaf certificate in cert.
+// CertExpiry scans the leaf and every intermediate in tc.Certificate,
+// returning the certificate with the earliest NotAfter along with the
+// duration remaining until that cert expires. remaining is negative
+// if the returned cert has already expired.
 //
-// daysRemaining is negative if the certificate is already expired.
-// If cert.Leaf is populated, it is used; otherwise the first entry in
-// cert.Certificate is parsed.
-func CertExpiry(cert tls.Certificate) (notAfter time.Time, daysRemaining int, err error) {
-	if cert.Leaf != nil {
-		notAfter = cert.Leaf.NotAfter
-	} else if len(cert.Certificate) > 0 {
-		leaf, perr := x509.ParseCertificate(cert.Certificate[0])
-		if perr != nil {
-			return time.Time{}, 0, fmt.Errorf("cert: %w", perr)
+// When tc.Leaf is populated, it is used in place of parsing
+// tc.Certificate[0] — this saves one parse and avoids re-parsing what
+// crypto/tls has already cached.
+//
+// Root CAs are NOT inspected here — they live in the peer's trust
+// store (x509.CertPool), not in tls.Certificate.Certificate. Only the
+// leaf plus shipped intermediates are considered.
+//
+// Returns an error when tc has no leaf at all (both Certificate is
+// empty and Leaf is nil) or when any chain entry fails to parse.
+//
+// Tie-break: when two chain entries share the same NotAfter, the one
+// closer to the leaf (lower index in tc.Certificate) is returned.
+func CertExpiry(tc tls.Certificate) (cert *x509.Certificate, remaining time.Duration, err error) {
+	if len(tc.Certificate) == 0 {
+		if tc.Leaf == nil {
+			return nil, 0, errors.New("cert: tls certificate has no leaf")
 		}
-		notAfter = leaf.NotAfter
-	} else {
-		return time.Time{}, 0, errors.New("cert: tls certificate has no leaf")
+		return tc.Leaf, time.Until(tc.Leaf.NotAfter), nil
 	}
 
-	const day = 24 * time.Hour
-
-	remaining := time.Until(notAfter)
-	daysRemaining = int(remaining / day)
-	if remaining < 0 && remaining%day != 0 {
-		daysRemaining--
+	var bottleneck *x509.Certificate
+	for i, der := range tc.Certificate {
+		var c *x509.Certificate
+		if i == 0 && tc.Leaf != nil {
+			c = tc.Leaf
+		} else {
+			parsed, perr := x509.ParseCertificate(der)
+			if perr != nil {
+				return nil, 0, fmt.Errorf("cert: parse chain[%d]: %w", i, perr)
+			}
+			c = parsed
+		}
+		if bottleneck == nil || c.NotAfter.Before(bottleneck.NotAfter) {
+			bottleneck = c
+		}
 	}
-	return notAfter, daysRemaining, nil
+
+	return bottleneck, time.Until(bottleneck.NotAfter), nil
 }

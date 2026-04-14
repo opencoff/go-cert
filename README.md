@@ -192,18 +192,23 @@ Available options:
 
 ### Cert Expiry
 
-`CertExpiry(cert)` returns the leaf certificate's `NotAfter` timestamp
-and the number of days remaining (negative if already expired). This
-is a convenience helper for startup logging, health checks, or
-scheduled renewal probes:
+`CertExpiry(cert)` returns the certificate in `tls.Certificate` with
+the earliest `NotAfter` along with the duration remaining until that
+cert expires (negative if already expired). Scans the leaf and all
+shipped intermediates; returns whichever expires first. Root CAs are
+not inspected because they live in the peer's trust store, not in
+`tls.Certificate.Certificate`.
 
 ```go
-notAfter, days, err := cert.CertExpiry(tlsCert)
+c, remaining, err := cert.CertExpiry(tlsCert)
 if err != nil {
-    return err
+    log.Fatal(err)
 }
-if days < 30 {
-    log.Printf("cert expires in %d days (%s)", days, notAfter)
+switch {
+case remaining <= 0:
+    log.Printf("EXPIRED: %s (expired %s ago)", c.Subject.CommonName, -remaining)
+case remaining < 7*24*time.Hour:
+    log.Printf("expiring soon: %s in %s", c.Subject.CommonName, remaining)
 }
 ```
 
